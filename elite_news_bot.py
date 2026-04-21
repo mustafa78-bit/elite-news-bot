@@ -15,7 +15,7 @@ import schedule
 SCAN_EVERY_MINUTES = 5
 STATE_FILE = "market_radar_state.json"
 
-TELEGRAM_BOT_TOKEN = os.getenv("8252756579:AAFxi5LjkA1jz9yqPaRmZ_IFoRK2rcOTh0A")
+TELEGRAM_BOT_TOKEN = os.getenv("8735115726:AAHVB0gR_z-Qyzs-ot99ilbDmr_D9tmoIt4 ")
 TELEGRAM_CHAT_ID = os.getenv("1307136561")
 
 HEADERS = {
