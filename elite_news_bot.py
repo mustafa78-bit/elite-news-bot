@@ -1,5 +1,4 @@
 import os
-import re
 import json
 import time
 import html
@@ -7,129 +6,162 @@ import logging
 import requests
 import feedparser
 
-# ================= CONFIG =================
-SCAN_EVERY_MINUTES = 5
-STATE_FILE = "market_radar_state.json"
+# ================= CONFIG (DOĞRUDAN GİRİŞ) =================
+SCAN_INTERVAL = 120  # 2 dakikada bir tarar
+STATE_FILE = "elite_radar_state.json"
 
-# Değerleri direkt tırnak içine aldım, boşlukları temizledim
+# Paydaş uyumu için token ve ID kodun içine gömüldü
 TELEGRAM_BOT_TOKEN = "8735115726:AAHVB0gR_z-Qyzs-ot99ilbDmr_D9tmoIt4"
 TELEGRAM_CHAT_ID = "1307136561"
 
-HEADERS = {"User-Agent": "Mozilla/5.0"}
-GOOGLE_NEWS_URL = "https://news.google.com/rss/search"
-
-# ================= LOGGING =================
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s"
-)
-logger = logging.getLogger("elite")
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+}
 
 session = requests.Session()
 session.headers.update(HEADERS)
 
-# ================= STATE MANAGEMENT =================
-def load_state():
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s"
+)
+logger = logging.getLogger("ELITE_RADAR")
+
+# ================= HELPERS =================
+def ensure_state():
     if not os.path.exists(STATE_FILE):
-        return {"seen": {}}
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump({"seen": []}, f, ensure_ascii=False)
+
+def load_state():
+    ensure_state()
     try:
-        with open(STATE_FILE, "r") as f:
-            return json.load(f)
-    except:
-        return {"seen": {}}
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if "seen" not in data or not isinstance(data["seen"], list):
+                return {"seen": []}
+            return data
+    except Exception:
+        return {"seen": []}
 
 def save_state(state):
-    with open(STATE_FILE, "w") as f:
-        json.dump(state, f)
+    with open(STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
 
-# ================= CORE FUNCTIONS =================
-def send_telegram(msg):
+def send_tg(msg):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": msg,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": False
-    }
     try:
-        r = requests.post(url, json=payload, timeout=10)
-        # Eğer Telegram hata dönerse logda görelim
+        r = session.post(
+            url,
+            json={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": msg,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": False,
+            },
+            timeout=10,
+        )
         if r.status_code != 200:
-            logger.error(f"Telegram Hatası: {r.status_code} - {r.text}")
+            logger.error(f"TG Hatası: {r.status_code} - {r.text}")
             return False
         return True
     except Exception as e:
-        logger.error(f"Bağlantı Hatası: {e}")
+        logger.error(f"TG Bağlantı Hatası: {e}")
         return False
 
-def classify(title):
+def classify_elite(title):
     t = title.lower()
-    if any(x in t for x in ["hack", "exploit", "breach", "drain"]):
-        return ("HACK", 92, "A+", "NEGATİF", "TREND")
-    if any(x in t for x in ["etf", "blackrock", "fidelity", "grayscale"]):
-        return ("ETF", 90, "A+", "POZİTİF", "KURUMSAL")
-    if "sec" in t:
-        return ("SEC", 85, "A", "NEGATİF", "KURUMSAL")
-    if any(x in t for x in ["cpi", "fed", "interest rate", "inflation"]):
-        return ("MACRO", 88, "A", "YÖN TAKİP", "MAKRO")
+    # 1) LISTING
+    if any(x in t for x in ["listing", "lists", "adds support", "new pair", "listed on"]):
+        if any(b in t for b in ["binance", "coinbase", "kraken", "upbit", "okx"]):
+            return ("LISTING", 98, "S+", "POZİTİF", "EXCHANGE_RADAR")
+    # 2) ABD VERİ / MAKRO
+    if any(x in t for x in ["cpi", "fed", "inflation", "pce", "nfp", "interest rate", "powell", "fomc"]):
+        return ("USA_DATA", 94, "A+", "VOLATİLİTE", "MACRO_OBSERVER")
+    # 3) GÜVENLİK / HACK
+    if any(x in t for x in ["hack", "exploit", "stolen", "drain", "attack"]):
+        return ("SECURITY", 95, "S", "KRİTİK NEGATİF", "SECURITY_BOT")
+    # 4) ETF / KURUMSAL
+    if any(x in t for x in ["etf", "blackrock", "fidelity", "spot bitcoin", "grayscale"]):
+        return ("INSTITUTIONAL", 90, "A", "POZİTİF", "INSTITUTION_BOT")
     return None
 
-def format_msg(tag, score, quality, effect, bot_type, title, link):
+def format_elite_msg(tag, score, quality, effect, bot_type, title, link):
+    safe_title = html.escape(title)
+    safe_link = html.escape(link, quote=True)
     return (
-        f"🧠 <b>ELITE NEWS</b>\n\n"
+        f"🚨 <b>{tag} ALARMI</b>\n"
+        f"━━━━━━━━━━━━━━━\n"
         f"🤖 Bot: <b>{bot_type}</b>\n"
-        f"🏷 Tür: <b>{tag}</b>\n"
-        f"⭐ Kalite: <b>{quality}</b>\n"
+        f"⭐ Kalite: <b>{quality}</b> | Skor: <b>{score}/100</b>\n"
         f"📈 Etki: <b>{effect}</b>\n"
-        f"🎯 Skor: <b>{score}/100</b>\n\n"
-        f"📰 {html.escape(title)}\n\n"
-        f"🔗 <a href=\"{link}\">Habere Git</a>"
+        f"━━━━━━━━━━━━━━━\n"
+        f"📰 <b>{safe_title}</b>\n\n"
+        f"🔗 <a href='{safe_link}'>Haber Kaynağına Git</a>"
     )
 
-# ================= MAIN LOOP =================
-def run():
-    logger.info("ELITE NEWS RADAR Başlatıldı...")
-    state = load_state()
+def fetch_google_news(query):
+    rss_url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
+    try:
+        r = session.get(rss_url, timeout=15)
+        if r.status_code != 200:
+            return []
+        feed = feedparser.parse(r.content)
+        return feed.entries[:10]
+    except Exception:
+        return []
+
+# ================= CORE LOOP =================
+def run_radar():
+    logger.info("ELITE RADAR V3 Aktif. Av başlıyor...")
+
+    queries = [
+        "Binance Coinbase Kraken OKX Upbit listing crypto",
+        "US CPI Fed Inflation PCE FOMC crypto",
+        "Bitcoin ETF BlackRock Fidelity Grayscale crypto",
+        "crypto hack exploit stolen drain attack",
+    ]
 
     while True:
         try:
-            # RSS üzerinden haberleri çek
-            params = {
-                "q": "(crypto OR bitcoin OR ethereum) (ETF OR hack OR SEC OR Fed)",
-                "hl": "en-US", "gl": "US", "ceid": "US:en"
-            }
-            r = session.get(GOOGLE_NEWS_URL, params=params, timeout=15)
-            if r.status_code != 200:
-                logger.warning("Google News'e ulaşılamadı.")
-                time.sleep(60)
-                continue
+            state = load_state()
+            seen = set(state.get("seen", []))
+            new_items = 0
 
-            feed = feedparser.parse(r.content)
-            
-            for e in feed.entries[:15]:
-                title = e.get("title", "")
-                link = e.get("link", "")
+            for query in queries:
+                entries = fetch_google_news(query)
+                for e in entries:
+                    title = e.get("title", "").strip()
+                    link = e.get("link", "").strip()
 
-                if title in state["seen"]:
-                    continue
+                    if not title or not link or title in seen:
+                        continue
 
-                result = classify(title)
-                if result:
-                    tag, score, quality, effect, bot_type = result
-                    msg = format_msg(tag, score, quality, effect, bot_type, title, link)
-                    
-                    if send_telegram(msg):
-                        logger.info(f"BAŞARILI: {title[:50]}...")
-                        state["seen"][title] = int(time.time())
+                    info = classify_elite(title)
+                    if not info:
+                        continue
+
+                    tag, score, quality, effect, bot_type = info
+                    msg = format_elite_msg(tag, score, quality, effect, bot_type, title, link)
+
+                    if send_tg(msg):
+                        logger.info(f"YAYINLANDI: {tag} | {title[:50]}...")
+                        state["seen"].append(title)
+                        seen.add(title)
+                        new_items += 1
+
+                        if len(state["seen"]) > 300:
+                            state["seen"] = state["seen"][-300:]
+
                         save_state(state)
-                    time.sleep(2) # Telegram spam filtresine takılmamak için
+                        time.sleep(2)
 
-            logger.info(f"Tarama bitti. {SCAN_EVERY_MINUTES} dk bekleniyor...")
-            time.sleep(SCAN_EVERY_MINUTES * 60)
+            logger.info(f"Tarama bitti. Yeni: {new_items}. {SCAN_INTERVAL} sn bekleniyor.")
+            time.sleep(SCAN_INTERVAL)
 
         except Exception as e:
-            logger.error(f"Ana döngüde hata: {e}")
+            logger.error(f"Döngü Hatası: {e}")
             time.sleep(30)
 
 if __name__ == "__main__":
-    run()
+    run_radar()
