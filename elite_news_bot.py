@@ -5,21 +5,22 @@ import json
 import html
 import logging
 from datetime import datetime, timezone, timedelta
+from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
 
 # =========================================================
-# BINANCE LISTING RADAR
+# BINANCE LISTING RADAR - FINAL
 # =========================================================
 
 SCAN_INTERVAL = 180
-LOOKBACK_HOURS = 36
+LOOKBACK_HOURS = 72
 REQUEST_TIMEOUT = 20
 STATE_FILE = "binance_listing_state.json"
 BOT_NAME = "EXCHANGE_RADAR"
 
-BINANCE_LIST_URL = "https://www.binance.com/en/support/announcement/list/48"
+BINANCE_LIST_URL = "https://www.binance.com/en/support/announcement/new-cryptocurrency-listing?c=48&hl=en&navId=48"
 BASE_URL = "https://www.binance.com"
 
 TELEGRAM_BOT_TOKEN = "8735115726:AAHVB0gR_z-Qyzs-ot99ilbDmr_D9tmoIt4"
@@ -260,7 +261,7 @@ def classify_title(title):
 
 
 # =========================================================
-# BINANCE FETCH
+# FETCH
 # =========================================================
 
 def fetch_html(url):
@@ -271,18 +272,34 @@ def fetch_html(url):
 
 def parse_list_page():
     html_text = fetch_html(BINANCE_LIST_URL)
-    candidates = set()
+    soup = BeautifulSoup(html_text, "html.parser")
 
-    patterns = [
-        r'/en/support/announcement/detail/([0-9a-fA-F]+)',
-        r'"code"\s*:\s*"([0-9a-fA-F]+)"',
-    ]
+    items = []
+    seen = set()
 
-    for pattern in patterns:
-        for code in re.findall(pattern, html_text, re.DOTALL):
-            candidates.add(f"{BASE_URL}/en/support/announcement/detail/{code}")
+    for a in soup.find_all("a", href=True):
+        href = (a.get("href") or "").strip()
+        title = a.get_text(" ", strip=True)
 
-    items = [{"title": "", "link": link} for link in sorted(candidates)]
+        if "/en/support/announcement/detail/" in href:
+            full_link = href if href.startswith("http") else urljoin(BASE_URL, href)
+            if full_link not in seen:
+                seen.add(full_link)
+                items.append({
+                    "title": title or "",
+                    "link": full_link
+                })
+
+    if not items:
+        matches = set(re.findall(r'/en/support/announcement/detail/[0-9a-fA-F]+', html_text))
+        for href in matches:
+            full_link = urljoin(BASE_URL, href)
+            if full_link not in seen:
+                seen.add(full_link)
+                items.append({
+                    "title": "",
+                    "link": full_link
+                })
 
     logger.info("Liste sayfasından %s aday bulundu", len(items))
     return items
@@ -341,7 +358,7 @@ def parse_detail_page(link, fallback_title=""):
 
     if not description:
         paragraphs = []
-        for p in soup.find_all(["p", "article"]):
+        for p in soup.find_all(["p", "article", "div"]):
             txt = p.get_text(" ", strip=True)
             if txt and len(txt) > 40:
                 paragraphs.append(txt)
@@ -398,7 +415,7 @@ def build_message(item, score):
 
 
 # =========================================================
-# MAIN CHECK
+# MAIN
 # =========================================================
 
 def process_once():
