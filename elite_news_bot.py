@@ -1,26 +1,23 @@
 import os
 import re
-import json
 import time
+import json
 import html
 import logging
 from datetime import datetime, timezone, timedelta
-from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
 
 # =========================================================
-# ULTRA ELITE BINANCE LISTING RADAR
-# Sadece resmi Binance listing duyuruları
+# BINANCE LISTING RADAR
 # =========================================================
 
-BOT_NAME = "EXCHANGE_RADAR"
-STATE_FILE = "binance_listing_state.json"
-
-SCAN_INTERVAL = 180          # saniye
-LOOKBACK_HOURS = 36          # sadece son X saat içindeki duyurular
+SCAN_INTERVAL = 180
+LOOKBACK_HOURS = 36
 REQUEST_TIMEOUT = 20
+STATE_FILE = "binance_listing_state.json"
+BOT_NAME = "EXCHANGE_RADAR"
 
 BINANCE_LIST_URL = "https://www.binance.com/en/support/announcement/list/48"
 BASE_URL = "https://www.binance.com"
@@ -31,147 +28,12 @@ TELEGRAM_CHAT_ID = "1307136561"
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     ),
     "Accept-Language": "en-US,en;q=0.9",
     "Cache-Control": "no-cache",
     "Pragma": "no-cache",
 }
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s"
-)
-logger = logging.getLogger("BINANCE_LISTING_RADAR")
-
-session = requests.Session()
-session.headers.update(HEADERS)
-
-
-# =========================================================
-# STATE
-# =========================================================
-
-def load_state():
-    if not os.path.exists(STATE_FILE):
-        return {"sent_links": [], "sent_titles": []}
-
-    try:
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            if not isinstance(data, dict):
-                return {"sent_links": [], "sent_titles": []}
-            data.setdefault("sent_links", [])
-            data.setdefault("sent_titles", [])
-            return data
-    except Exception as e:
-        logger.warning("State okunamadı, sıfırlanıyor: %s", e)
-        return {"sent_links": [], "sent_titles": []}
-
-
-def save_state(state):
-    try:
-        with open(STATE_FILE, "w", encoding="utf-8") as f:
-            json.dump(state, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        logger.error("State kaydedilemedi: %s", e)
-
-
-# =========================================================
-# TELEGRAM
-# =========================================================
-
-def send_telegram(text):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        logger.warning("Telegram bilgileri eksik. Mesaj basılıyor:\n%s", text)
-        return False
-
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": text,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": False
-    }
-
-    try:
-        r = session.post(url, data=payload, timeout=REQUEST_TIMEOUT)
-        r.raise_for_status()
-        return True
-    except Exception as e:
-        logger.error("Telegram gönderim hatası: %s", e)
-        return False
-
-
-# =========================================================
-# HELPERS
-# =========================================================
-
-def norm(s):
-    return re.sub(r"\s+", " ", (s or "").strip()).lower()
-
-
-def now_utc():
-    return datetime.now(timezone.utc)
-
-
-def safe_text(x):
-    return html.escape((x or "").strip())
-
-
-def parse_datetime_from_text(text):
-    if not text:
-        return None
-
-    text = text.strip()
-
-    patterns = [
-        "%Y-%m-%d %H:%M",
-        "%Y-%m-%d %H:%M:%S",
-        "%Y-%m-%d",
-        "%b %d, %Y",
-        "%B %d, %Y",
-    ]
-
-    for fmt in patterns:
-        try:
-            dt = datetime.strptime(text, fmt)
-            return dt.replace(tzinfo=timezone.utc)
-        except Exception:
-            pass
-
-    m = re.search(r"(\d{4}-\d{2}-\d{2})(?:[ T](\d{2}:\d{2}(?::\d{2})?))?", text)
-    if m:
-        date_part = m.group(1)
-        time_part = m.group(2) or "00:00:00"
-        if len(time_part) == 5:
-            time_part += ":00"
-        try:
-            dt = datetime.strptime(f"{date_part} {time_part}", "%Y-%m-%d %H:%M:%S")
-            return dt.replace(tzinfo=timezone.utc)
-        except Exception:
-            return None
-
-    return None
-
-
-def extract_symbols(title):
-    found = re.findall(r"\(([A-Z0-9]{2,15})\)", title or "")
-    if found:
-        return ", ".join(found[:5])
-    return "-"
-
-
-def is_recent(dt, lookback_hours=LOOKBACK_HOURS):
-    if not dt:
-        return False
-    return dt >= now_utc() - timedelta(hours=lookback_hours)
-
-
-# =========================================================
-# FILTER LOGIC
-# =========================================================
 
 BLOCK_KEYWORDS = [
     "price prediction",
@@ -222,6 +84,143 @@ SOFT_POSITIVE_KEYWORDS = [
     "new cryptocurrency listing",
 ]
 
+session = requests.Session()
+session.headers.update(HEADERS)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s"
+)
+logger = logging.getLogger("BINANCE_LISTING_RADAR")
+
+
+# =========================================================
+# STATE
+# =========================================================
+
+def ensure_state():
+    if not os.path.exists(STATE_FILE):
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump({"sent_links": [], "sent_titles": []}, f, ensure_ascii=False, indent=2)
+
+
+def load_state():
+    ensure_state()
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if not isinstance(data, dict):
+                return {"sent_links": [], "sent_titles": []}
+            data.setdefault("sent_links", [])
+            data.setdefault("sent_titles", [])
+            return data
+    except Exception as e:
+        logger.warning("State okunamadı, sıfırlanıyor: %s", e)
+        return {"sent_links": [], "sent_titles": []}
+
+
+def save_state(state):
+    try:
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error("State kaydedilemedi: %s", e)
+
+
+# =========================================================
+# HELPERS
+# =========================================================
+
+def norm(s):
+    return re.sub(r"\s+", " ", (s or "").strip()).lower()
+
+
+def now_utc():
+    return datetime.now(timezone.utc)
+
+
+def safe_text(x):
+    return html.escape((x or "").strip())
+
+
+def extract_symbols(title):
+    found = re.findall(r"\(([A-Z0-9]{2,15})\)", title or "")
+    if found:
+        return ", ".join(found[:5])
+    return "-"
+
+
+def parse_datetime_from_text(text):
+    if not text:
+        return None
+
+    text = text.strip()
+
+    patterns = [
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d",
+        "%b %d, %Y",
+        "%B %d, %Y",
+    ]
+
+    for fmt in patterns:
+        try:
+            dt = datetime.strptime(text, fmt)
+            return dt.replace(tzinfo=timezone.utc)
+        except Exception:
+            pass
+
+    m = re.search(r"(\d{4}-\d{2}-\d{2})(?:[ T](\d{2}:\d{2}(?::\d{2})?))?", text)
+    if m:
+        date_part = m.group(1)
+        time_part = m.group(2) or "00:00:00"
+        if len(time_part) == 5:
+            time_part += ":00"
+        try:
+            dt = datetime.strptime(f"{date_part} {time_part}", "%Y-%m-%d %H:%M:%S")
+            return dt.replace(tzinfo=timezone.utc)
+        except Exception:
+            return None
+
+    return None
+
+
+def is_recent(dt, lookback_hours=LOOKBACK_HOURS):
+    if not dt:
+        return False
+    return dt >= now_utc() - timedelta(hours=lookback_hours)
+
+
+# =========================================================
+# TELEGRAM
+# =========================================================
+
+def send_telegram(text):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        logger.warning("Telegram bilgileri eksik.")
+        return False
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": False
+    }
+
+    try:
+        r = session.post(url, data=payload, timeout=REQUEST_TIMEOUT)
+        r.raise_for_status()
+        return True
+    except Exception as e:
+        logger.error("Telegram gönderim hatası: %s", e)
+        return False
+
+
+# =========================================================
+# FILTER
+# =========================================================
 
 def classify_title(title):
     t = norm(title)
@@ -261,7 +260,7 @@ def classify_title(title):
 
 
 # =========================================================
-# BINANCE SCRAPE
+# BINANCE FETCH
 # =========================================================
 
 def fetch_html(url):
@@ -272,37 +271,21 @@ def fetch_html(url):
 
 def parse_list_page():
     html_text = fetch_html(BINANCE_LIST_URL)
-    soup = BeautifulSoup(html_text, "html.parser")
+    candidates = set()
 
-    items = []
+    patterns = [
+        r'/en/support/announcement/detail/([0-9a-fA-F]+)',
+        r'"code"\s*:\s*"([0-9a-fA-F]+)"',
+    ]
 
-    for a in soup.find_all("a", href=True):
-        href = a.get("href", "").strip()
-        title = a.get_text(" ", strip=True)
+    for pattern in patterns:
+        for code in re.findall(pattern, html_text, re.DOTALL):
+            candidates.add(f"{BASE_URL}/en/support/announcement/detail/{code}")
 
-        if "/en/support/announcement/detail/" in href and title:
-            full_link = urljoin(BASE_URL, href)
-            items.append({"title": title, "link": full_link})
+    items = [{"title": "", "link": link} for link in sorted(candidates)]
 
-    if not items:
-        link_matches = re.findall(
-            r'(\/en\/support\/announcement\/detail\/[a-zA-Z0-9]+)',
-            html_text
-        )
-        for href in set(link_matches):
-            full_link = urljoin(BASE_URL, href)
-            items.append({"title": "", "link": full_link})
-
-    seen = set()
-    clean = []
-    for item in items:
-        key = item["link"]
-        if key not in seen:
-            seen.add(key)
-            clean.append(item)
-
-    logger.info("Liste sayfasından %s aday bulundu", len(clean))
-    return clean
+    logger.info("Liste sayfasından %s aday bulundu", len(items))
+    return items
 
 
 def parse_detail_page(link, fallback_title=""):
@@ -310,7 +293,8 @@ def parse_detail_page(link, fallback_title=""):
     soup = BeautifulSoup(html_text, "html.parser")
     page_text = soup.get_text("\n", strip=True)
 
-    title = fallback_title.strip()
+    title = fallback_title.strip() if fallback_title else ""
+
     if not title:
         h1 = soup.find("h1")
         if h1:
@@ -329,6 +313,7 @@ def parse_detail_page(link, fallback_title=""):
         soup.find("meta", attrs={"name": "date"}),
         soup.find("meta", attrs={"property": "og:updated_time"}),
     ]
+
     for m in meta_candidates:
         if m and m.get("content"):
             published = parse_datetime_from_text(m["content"])
@@ -373,12 +358,12 @@ def parse_detail_page(link, fallback_title=""):
 
 
 # =========================================================
-# MESSAGE FORMAT
+# MESSAGE
 # =========================================================
 
 def build_message(item, score):
     title = safe_text(item["title"])
-    link = safe_text(item["link"])
+    link = html.escape(item["link"], quote=True)
     desc = safe_text(item.get("description", ""))[:300]
     symbols = safe_text(extract_symbols(item["title"]))
 
@@ -424,7 +409,7 @@ def process_once():
     candidates = parse_list_page()
     alerts_sent = 0
 
-    for candidate in candidates[:20]:
+    for candidate in candidates[:30]:
         try:
             detail = parse_detail_page(candidate["link"], candidate.get("title", ""))
 
@@ -433,11 +418,9 @@ def process_once():
                 continue
 
             if candidate["link"] in sent_links:
-                logger.info("Zaten gönderilmiş link, geçildi: %s", detail["title"])
                 continue
 
             if norm(detail["title"]) in sent_titles:
-                logger.info("Zaten gönderilmiş başlık, geçildi: %s", detail["title"])
                 continue
 
             if not is_recent(detail.get("published"), LOOKBACK_HOURS):
@@ -482,6 +465,7 @@ def main():
             process_once()
         except Exception as e:
             logger.exception("Ana döngü hatası: %s", e)
+            time.sleep(30)
 
         time.sleep(SCAN_INTERVAL)
 
