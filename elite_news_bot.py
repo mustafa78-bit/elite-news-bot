@@ -11,22 +11,19 @@ import requests
 import feedparser
 
 # =========================================================
-# AYARLAR
+# SABİT AYARLAR
 # =========================================================
-TELEGRAM_BOT_TOKEN = "8735115726:AAHVB0gR_z-Qyzs-ot99ilbDmr_D9tmoIt4"
+TELEGRAM_BOT_TOKEN = "8763528906:AAHcCr2WfM6YUQpdBHiO_RldzHDPXOdxTsg"
 TELEGRAM_CHAT_ID = "1307136561"
 
-STATE_FILE = "binance_listing_rss_state.json"
+STATE_FILE = "mega_radar_state.json"
 SCAN_INTERVAL = 180
 REQUEST_TIMEOUT = 20
 
-# Kaç saatlik haberler değerlendirilsin
+# Binance Listing Radar
 LOOKBACK_HOURS = 24
+LISTING_WARM_START = True
 
-# İlk açılışta mevcut adayları state'e ekle, mesaj atma
-WARM_START = True
-
-# Sadece Binance support listing benzeri sonuçları hedefliyoruz
 SEARCH_QUERY = (
     'site:binance.com/en/support/announcement '
     '("Binance Will List" OR "New Cryptocurrency Listing" OR '
@@ -38,7 +35,6 @@ GOOGLE_NEWS_RSS = (
     "q={query}&hl=en-US&gl=US&ceid=US:en"
 )
 
-# Pozitif kalıplar
 LISTING_REQUIRED = [
     "binance will list",
     "will list",
@@ -49,7 +45,6 @@ LISTING_REQUIRED = [
     "binance lists",
 ]
 
-# Engellenecek kalıplar
 LISTING_FORBIDDEN = [
     "futures",
     "perpetual",
@@ -68,6 +63,28 @@ LISTING_FORBIDDEN = [
     "copy trading",
 ]
 
+# Alpha / Funding / VC Radar
+RSS_FEEDS = [
+    "https://www.theblock.co/rss.xml",
+    "https://www.coindesk.com/arc/outboundfeeds/rss/",
+    "https://cointelegraph.com/rss",
+    "https://cryptoslate.com/feed/",
+    "https://news.bitcoin.com/feed/",
+    "https://www.coindesk.com/arc/outboundfeeds/rss/?outputType=xml",
+]
+
+TIER_S_VCS = [
+    "a16z", "paradigm", "binance labs", "polychain",
+    "multicoin", "dragonfly", "sequoia", "pantera"
+]
+
+TIER_A_VCS = [
+    "coinbase ventures", "hashed", "animoca",
+    "electric capital", "consensys"
+]
+
+ALPHA_SCORE_THRESHOLD = 45
+
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -79,7 +96,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s"
 )
-logger = logging.getLogger("BINANCE_LISTING_RSS")
+logger = logging.getLogger("MEGA_RADAR")
 
 session = requests.Session()
 session.headers.update(HEADERS)
@@ -88,19 +105,19 @@ session.headers.update(HEADERS)
 # =========================================================
 # STATE
 # =========================================================
+def default_state():
+    return {
+        "listing_initialized": False,
+        "listing_sent_links": [],
+        "listing_sent_titles": [],
+        "alpha_seen_ids": []
+    }
+
+
 def ensure_state():
     if not os.path.exists(STATE_FILE):
         with open(STATE_FILE, "w", encoding="utf-8") as f:
-            json.dump(
-                {
-                    "sent_links": [],
-                    "sent_titles": [],
-                    "initialized": False
-                },
-                f,
-                ensure_ascii=False,
-                indent=2
-            )
+            json.dump(default_state(), f, ensure_ascii=False, indent=2)
 
 
 def load_state():
@@ -108,27 +125,41 @@ def load_state():
     try:
         with open(STATE_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-            if not isinstance(data, dict):
-                raise ValueError("State dict değil")
-            data.setdefault("sent_links", [])
-            data.setdefault("sent_titles", [])
-            data.setdefault("initialized", False)
-            return data
+
+        if not isinstance(data, dict):
+            raise ValueError("State dict değil")
+
+        base = default_state()
+        base.update(data)
+
+        if not isinstance(base.get("listing_sent_links"), list):
+            base["listing_sent_links"] = []
+
+        if not isinstance(base.get("listing_sent_titles"), list):
+            base["listing_sent_titles"] = []
+
+        if not isinstance(base.get("alpha_seen_ids"), list):
+            base["alpha_seen_ids"] = []
+
+        if not isinstance(base.get("listing_initialized"), bool):
+            base["listing_initialized"] = False
+
+        return base
+
     except Exception as e:
         logger.warning("State okunamadı, sıfırlanıyor: %s", e)
-        return {
-            "sent_links": [],
-            "sent_titles": [],
-            "initialized": False
-        }
+        return default_state()
 
 
 def save_state(state):
     try:
-        state["sent_links"] = state["sent_links"][-1000:]
-        state["sent_titles"] = state["sent_titles"][-1000:]
+        state["listing_sent_links"] = state.get("listing_sent_links", [])[-2000:]
+        state["listing_sent_titles"] = state.get("listing_sent_titles", [])[-2000:]
+        state["alpha_seen_ids"] = state.get("alpha_seen_ids", [])[-5000:]
+
         with open(STATE_FILE, "w", encoding="utf-8") as f:
             json.dump(state, f, ensure_ascii=False, indent=2)
+
     except Exception as e:
         logger.error("State kaydedilemedi: %s", e)
 
@@ -142,6 +173,14 @@ def norm(s: str) -> str:
 
 def safe_text(s: str) -> str:
     return html.escape((s or "").strip())
+
+
+def safe_markdown_text(s: str) -> str:
+    s = (s or "").strip()
+    escape_chars = r'_*[]()~`>#+-=|{}.!'
+    for ch in escape_chars:
+        s = s.replace(ch, f"\\{ch}")
+    return s
 
 
 def now_utc():
@@ -194,7 +233,7 @@ def is_recent(dt, lookback_hours=LOOKBACK_HOURS):
 # =========================================================
 # TELEGRAM
 # =========================================================
-def send_telegram(text: str) -> bool:
+def send_telegram_html(text: str) -> bool:
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
@@ -208,12 +247,30 @@ def send_telegram(text: str) -> bool:
         r.raise_for_status()
         return True
     except Exception as e:
-        logger.error("Telegram gönderim hatası: %s", e)
+        logger.error("Telegram HTML gönderim hatası: %s", e)
+        return False
+
+
+def send_telegram_markdown(text: str) -> bool:
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": text,
+        "parse_mode": "MarkdownV2",
+        "disable_web_page_preview": True
+    }
+
+    try:
+        r = session.post(url, json=payload, timeout=REQUEST_TIMEOUT)
+        r.raise_for_status()
+        return True
+    except Exception as e:
+        logger.error("Telegram Markdown gönderim hatası: %s", e)
         return False
 
 
 # =========================================================
-# FILTER
+# BINANCE LISTING
 # =========================================================
 def classify_listing(title: str):
     t = norm(title)
@@ -267,10 +324,7 @@ def classify_listing(title: str):
     }
 
 
-# =========================================================
-# FETCH
-# =========================================================
-def fetch_candidates():
+def fetch_listing_candidates():
     rss_url = GOOGLE_NEWS_RSS.format(query=quote(SEARCH_QUERY))
     r = session.get(rss_url, timeout=REQUEST_TIMEOUT)
     r.raise_for_status()
@@ -294,14 +348,11 @@ def fetch_candidates():
             "description": summary,
         })
 
-    logger.info("RSS aday sayısı: %s", len(items))
+    logger.info("Listing RSS aday sayısı: %s", len(items))
     return items
 
 
-# =========================================================
-# MESSAGE
-# =========================================================
-def build_message(item, score: int) -> str:
+def build_listing_message(item, score: int) -> str:
     title = safe_text(item["title"])
     link = html.escape(item["link"], quote=True)
     desc = safe_text(item.get("description", ""))[:250]
@@ -329,20 +380,15 @@ def build_message(item, score: int) -> str:
         "━━━━━━━━━━━━━━━\n"
         f"🔗 <a href=\"{link}\">Habere Git</a>"
     )
-
     return msg
 
 
-# =========================================================
-# MAIN
-# =========================================================
-def process_once():
-    state = load_state()
-    sent_links = set(state.get("sent_links", []))
-    sent_titles = set(norm(x) for x in state.get("sent_titles", []))
-    initialized = state.get("initialized", False)
+def process_listing_once(state):
+    sent_links = set(state.get("listing_sent_links", []))
+    sent_titles = set(norm(x) for x in state.get("listing_sent_titles", []))
+    initialized = state.get("listing_initialized", False)
 
-    candidates = fetch_candidates()
+    candidates = fetch_listing_candidates()
     alerts_sent = 0
     seeded = 0
 
@@ -357,54 +403,194 @@ def process_once():
             if link in sent_links or norm(title) in sent_titles:
                 continue
 
-            # Eski haberleri hiç gönderme
             if not is_recent(item.get("published"), LOOKBACK_HOURS):
-                logger.info("ESKİ GEÇİLDİ: %s", title)
+                logger.info("LISTING ESKİ GEÇİLDİ: %s", title)
                 sent_links.add(link)
                 sent_titles.add(norm(title))
                 continue
 
             verdict = classify_listing(title)
             if not verdict["allow"]:
-                logger.info("REJECT: %s | neden=%s", title, verdict["reason"])
+                logger.info("LISTING REJECT: %s | neden=%s", title, verdict["reason"])
                 sent_links.add(link)
                 sent_titles.add(norm(title))
                 continue
 
-            # İlk açılışta mevcut adayları sadece state'e yaz, mesaj atma
-            if WARM_START and not initialized:
-                logger.info("WARM START SEED: %s", title)
+            if LISTING_WARM_START and not initialized:
+                logger.info("LISTING WARM START SEED: %s", title)
                 sent_links.add(link)
                 sent_titles.add(norm(title))
                 seeded += 1
                 continue
 
-            msg = build_message(item, verdict["score"])
-            ok = send_telegram(msg)
+            msg = build_listing_message(item, verdict["score"])
+            ok = send_telegram_html(msg)
 
             if ok:
                 sent_links.add(link)
                 sent_titles.add(norm(title))
                 alerts_sent += 1
-                logger.info("ALARM GÖNDERİLDİ: %s", title)
+                logger.info("LISTING ALARM GÖNDERİLDİ: %s", title)
                 time.sleep(2)
 
         except Exception as e:
-            logger.exception("Aday işlenemedi: %s | hata=%s", item, e)
+            logger.exception("Listing adayı işlenemedi: %s | hata=%s", item, e)
 
-    state["sent_links"] = list(sent_links)
-    state["sent_titles"] = list(sent_titles)
-    state["initialized"] = True
+    state["listing_sent_links"] = list(sent_links)
+    state["listing_sent_titles"] = list(sent_titles)
+    state["listing_initialized"] = True
+
+    logger.info("Listing turu tamamlandı | alarm: %s | seed: %s", alerts_sent, seeded)
+    return alerts_sent
+
+
+# =========================================================
+# ALPHA / FUNDING / VC RADAR
+# =========================================================
+def calculate_alpha_score(title, body):
+    text = f"{title} {body}".lower()
+    score = 20
+
+    for vc in TIER_S_VCS:
+        if vc in text:
+            score += 25
+
+    for vc in TIER_A_VCS:
+        if vc in text:
+            score += 12
+
+    funding_keywords = [
+        "funding",
+        "raised",
+        "investment",
+        "round",
+        "seed",
+        "series a",
+        "series b",
+        "$",
+        "million",
+        "m raised"
+    ]
+
+    for kw in funding_keywords:
+        if kw in text:
+            score += 8
+
+    if any(x in text for x in ["10m", "20m", "50m", "100m", "million"]):
+        score += 15
+
+    return min(score, 100)
+
+
+def fetch_alpha_news():
+    news = []
+
+    for url in RSS_FEEDS:
+        try:
+            r = session.get(url, timeout=12)
+            r.raise_for_status()
+
+            feed = feedparser.parse(r.text)
+            for entry in feed.entries[:6]:
+                news_id = entry.get("id") or entry.get("link")
+                title = (entry.get("title") or "").strip()
+                body = (entry.get("summary") or entry.get("description") or "").strip()
+                link = (entry.get("link") or "").strip()
+
+                if not news_id or not title:
+                    continue
+
+                news.append({
+                    "id": news_id,
+                    "title": title,
+                    "body": body,
+                    "link": link,
+                })
+
+        except Exception as e:
+            logger.warning("Alpha RSS hatası (%s): %s", url, e)
+
+    logger.info("Alpha RSS toplam haber sayısı: %s", len(news))
+    return news
+
+
+def build_alpha_message(title, score, link):
+    safe_title = safe_markdown_text(title)
+    safe_link = safe_markdown_text(link)
+    now_text = safe_markdown_text(datetime.now().strftime("%H:%M:%S"))
+
+    emoji = "💎" if score >= 75 else "🔥" if score >= 55 else "📈"
+
+    msg = (
+        f"{emoji} *ALPHA ENGINE*\n\n"
+        f"🪙 *Project:* {safe_title}\n"
+        f"📊 *Score:* {score}/100\n"
+        f"🔗 *Link:* {safe_link}\n\n"
+        f"🕒 {now_text}"
+    )
+    return msg
+
+
+def process_alpha_once(state):
+    seen_news_ids = set(state.get("alpha_seen_ids", []))
+    sent_count = 0
+
+    all_news = fetch_alpha_news()
+
+    for item in all_news:
+        try:
+            news_id = item.get("id")
+            title = item.get("title", "")
+            body = item.get("body", "")
+            link = item.get("link", "")
+
+            if not news_id or news_id in seen_news_ids:
+                continue
+
+            score = calculate_alpha_score(title, body)
+
+            if score >= ALPHA_SCORE_THRESHOLD:
+                logger.info("ALPHA sinyal yakalandı | score=%s | title=%s", score, title[:80])
+                msg = build_alpha_message(title, score, link)
+                ok = send_telegram_markdown(msg)
+
+                if ok:
+                    sent_count += 1
+                    time.sleep(2)
+
+            seen_news_ids.add(news_id)
+
+        except Exception as e:
+            logger.exception("Alpha haber işlenemedi: %s | hata=%s", item, e)
+
+    state["alpha_seen_ids"] = list(seen_news_ids)
+    logger.info("Alpha turu tamamlandı | alarm: %s", sent_count)
+    return sent_count
+
+
+# =========================================================
+# ANA DÖNGÜ
+# =========================================================
+def process_once():
+    state = load_state()
+
+    listing_count = process_listing_once(state)
+    alpha_count = process_alpha_once(state)
+
     save_state(state)
 
-    logger.info("Tur tamamlandı | gönderilen alarm: %s | seed: %s", alerts_sent, seeded)
+    logger.info(
+        "GENEL TUR BİTTİ | listing_alarm=%s | alpha_alarm=%s",
+        listing_count, alpha_count
+    )
 
 
 def main():
-    logger.info("Bot başladı: Binance Listing RSS Radar")
+    logger.info("Bot başladı: MEGA RADAR")
     logger.info("Tarama aralığı: %s sn", SCAN_INTERVAL)
     logger.info("Lookback: %s saat", LOOKBACK_HOURS)
-    logger.info("Warm start: %s", WARM_START)
+    logger.info("Listing warm start: %s", LISTING_WARM_START)
+    logger.info("Alpha eşik: %s", ALPHA_SCORE_THRESHOLD)
 
     while True:
         try:
