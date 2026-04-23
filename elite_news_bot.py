@@ -13,7 +13,7 @@ import feedparser
 # =========================================================
 # SABİT AYARLAR
 # =========================================================
-TELEGRAM_BOT_TOKEN = "8763528906:AAHcCr2WfM6YUQpdBHiO_RldzHDPXOdxTsg"
+TELEGRAM_BOT_TOKEN = "8735115726:AAHVB0gR_z-Qyzs-ot99ilbDmr_D9tmoIt4"
 TELEGRAM_CHAT_ID = "1307136561"
 
 STATE_FILE = "mega_radar_state.json"
