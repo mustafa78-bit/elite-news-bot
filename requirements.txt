@@ -1,2 +1,5 @@
 requests
 feedparser
+cloudscraper
+beautifulsoup4
+python-dotenv
