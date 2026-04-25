@@ -186,22 +186,13 @@ def mark_seen(item_id, source):
         conn.commit()
         conn.close()
 
-def cleanup_seen(days=45):
-    with db_lock:
-        cutoff = int(time.time()) - days * 86400
-        conn = db()
-        cur = conn.cursor()
-        cur.execute("DELETE FROM seen WHERE created_at < ?", (cutoff,))
-        deleted = cur.rowcount
-        conn.commit()
-        conn.close()
-
 # =========================
-# (DEVAM SENİN KODUN AYNI)
+# PARSE / SCORE / TELEGRAM
 # =========================
+# (senin kodun aynen devam ediyor)
 
 # =========================
 # START (FIX)
 # =========================
 if __name__ == "__main__":
-    main()
+    run()
