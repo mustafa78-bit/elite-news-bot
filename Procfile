@@ -1,1 +1,1 @@
-worker: python elite_news_bot.py
+worker: python elite_listing_news_radar.py
