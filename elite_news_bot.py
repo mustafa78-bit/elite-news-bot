@@ -32,7 +32,7 @@ RSS_SOURCES = {
     "Dragonfly": "https://www.dragonfly.xyz/feed",
 }
 
-BLACKLIST_WORDS = {
+BLACKLIST = {
     "THE","AND","FOR","WITH","FROM","THIS","THAT","WILL","HAVE","ARE","HAS",
     "USD","USDT","USDC","CEO","SEC","ETF","API","DAO","NEWS","CRYPTO","TOKEN",
     "MARKET","PRICE","GLOBAL","WORLD","FED","CFTC","NASDAQ","IPO","AUM"
@@ -60,7 +60,11 @@ SCORES = {
     "PARTNERSHIP": 18,
 }
 
-logging.basicConfig(filename=LOG_FILE, level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+logging.basicConfig(
+    filename=LOG_FILE,
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s"
+)
 console = logging.StreamHandler()
 console.setLevel(logging.INFO)
 logging.getLogger("").addHandler(console)
@@ -91,7 +95,12 @@ def send_tg(text):
     try:
         r = requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            json={"chat_id": CHAT_ID, "text": text[:3900], "parse_mode": "HTML", "disable_web_page_preview": False},
+            json={
+                "chat_id": CHAT_ID,
+                "text": text[:3900],
+                "parse_mode": "HTML",
+                "disable_web_page_preview": False
+            },
             timeout=12
         )
         logging.info(f"Telegram {r.status_code}")
@@ -103,7 +112,7 @@ def extract_symbols(text):
     candidates = re.findall(r"\b[A-Z][A-Z0-9]{1,9}\b", upper)
     out = []
     for c in candidates:
-        if c in BLACKLIST_WORDS:
+        if c in BLACKLIST:
             continue
         if len(c) < 3 or len(c) > 8:
             continue
@@ -133,7 +142,7 @@ def okx_recent(title):
     try:
         dt = datetime.strptime(m.group(1), "%b %d, %Y")
         return (datetime.utcnow() - dt).days <= OKX_MAX_DAYS
-    except:
+    except Exception:
         return False
 
 def handle_item(source, title, link, summary=""):
@@ -162,6 +171,7 @@ def handle_item(source, title, link, summary=""):
         msg += f"<b>Kaynak:</b> {source}\n"
         msg += f"<b>Score:</b> {score}/100\n"
         msg += f"<b>Başlık:</b> {title}\n"
+
         if tags:
             msg += f"<b>Etiket:</b> {', '.join(tags)}\n"
         if coins:
@@ -170,6 +180,7 @@ def handle_item(source, title, link, summary=""):
             msg += f"\n{summary[:500]}\n"
         if link:
             msg += f"\n<a href='{link}'>Detay</a>"
+
         send_tg(msg)
 
     mark_seen(item_id)
@@ -183,6 +194,7 @@ def scan_rss():
             feed = feedparser.parse(r.content)
             entries = feed.entries or []
             logging.info(f"RSS {source} status={r.status_code} entries={len(entries)}")
+
             for e in entries[:20]:
                 if handle_item(source, e.get("title",""), e.get("link",""), e.get("summary","")):
                     total += 1
@@ -193,13 +205,16 @@ def scan_rss():
 def scan_okx():
     url = "https://www.okx.com/help/section/announcements-new-listings"
     total = 0
+
     try:
         r = requests.get(url, headers=HEADERS, timeout=15)
         logging.info(f"OKX status={r.status_code} len={len(r.text)}")
+
         if r.status_code != 200:
             return 0
 
         soup = BeautifulSoup(r.text, "html.parser")
+
         for a in soup.find_all("a", href=True):
             title = a.get_text(" ", strip=True)
             href = a["href"]
@@ -214,10 +229,13 @@ def scan_okx():
                 continue
 
             full = href if href.startswith("http") else "https://www.okx.com" + href
+
             if handle_item("OKX_OFFICIAL", title, full, ""):
                 total += 1
+
     except Exception as e:
         logging.error(f"OKX error: {e}")
+
     return total
 
 def main():
